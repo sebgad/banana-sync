@@ -10,11 +10,22 @@ import 'package:xml/xml.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 
+class RootPath {
+  final String remoteRootPath;
+  final String localRootPath;
+  final int rootFolderId;
+
+  RootPath({
+    required this.remoteRootPath,
+    required this.localRootPath,
+    required this.rootFolderId,
+  });
+}
+
 class NextcloudDAV {
   final String baseUrl;
   final String username;
   final String password;
-  final String localPath;
   final String remoteUrl;
   final File databasePath;
 
@@ -27,11 +38,12 @@ class NextcloudDAV {
     required this.baseUrl,
     required this.username,
     required this.password,
-    required this.localPath,
     required this.databasePath,
   }) : remoteUrl = '$baseUrl/remote.php/dav/files/$username',
        authHeader = 'Basic ${base64Encode(utf8.encode('$username:$password'))}',
-       db = _initDb(databasePath);
+       db = _initDb(databasePath) {
+    createSyncDatabase();
+  }
 
   static Database _initDb(File databasePath) {
     print('Opening database at ${databasePath.path}');
@@ -39,10 +51,36 @@ class NextcloudDAV {
     return db;
   }
 
-  void begin() {
+  Future<void> addRootPath(String remoteRootPath, String localRootPath) async {
+    db.execute('''
+      INSERT INTO rootFolder (remoteRootPath, localRootPath)
+      VALUES ("$remoteRootPath", "$localRootPath")
+    ''');
+    print('Added root path: $remoteRootPath -> $localRootPath');
+  }
+
+  Future<void> deleteRootPathById(int rootFolderId) async {
+    // Delete entries from syncTable where rootFolderId matches
+    db.execute('DELETE FROM syncTable WHERE rootFolderId = $rootFolderId');
+    db.execute('''DELETE FROM rootFolder WHERE id = $rootFolderId''');
+  }
+
+  Future<List<RootPath>> getRootPaths() async {
+    final result = db.select('SELECT * FROM rootFolder');
+    return result.map((row) {
+      return RootPath(
+        remoteRootPath: row['remoteRootPath'] as String,
+        localRootPath: row['localRootPath'] as String,
+        rootFolderId: row['id'] as int,
+      );
+    }).toList();
+  }
+
+  void createSyncDatabase() {
     db.execute('''
       CREATE TABLE IF NOT EXISTS syncTable (
-        path TEXT PRIMARY KEY,
+        rootFolderId INTEGER NOT NULL,
+        path TEXT NOT NULL,
         remoteLastModified INTEGER,
         remoteLastModifiedPrev INTEGER,
         existsRemote BOOLEAN DEFAULT FALSE,
@@ -50,13 +88,25 @@ class NextcloudDAV {
         localLastModifiedPrev INTEGER,
         existsLocal BOOLEAN DEFAULT FALSE,
         synced BOOLEAN DEFAULT FALSE,
-        captured INTEGER
-      )
+        captured INTEGER,
+        PRIMARY KEY (rootFolderId, path)
+      );
     ''');
 
     db.execute('''
+      CREATE TABLE IF NOT EXISTS rootFolder (
+        id INTEGER PRIMARY KEY,
+        remoteRootPath TEXT NOT NULL,
+        localRootPath TEXT NOT NULL
+      );
+    ''');
+  }
+
+  void begin(int rootFolderId) {
+    db.execute('''
       UPDATE syncTable
       SET existsRemote = FALSE, existsLocal = FALSE
+      WHERE rootFolderId = $rootFolderId
     ''');
 
     captured = DateTime.now().millisecondsSinceEpoch;
@@ -75,15 +125,20 @@ class NextcloudDAV {
     </d:propfind>
   ''';
 
-  Future<void> updateRemoteFileList() async {
+  Future<void> updateRemoteFileList(
+    String remoteRootPath,
+    int rootFolderId,
+  ) async {
     requestOnGoing = true;
     final stopwatch = Stopwatch()..start();
 
     final client = http.Client();
+
     try {
-      final request = http.Request('PROPFIND', Uri.parse(remoteUrl))
+      final url = "$remoteUrl/$remoteRootPath";
+      final request = http.Request('PROPFIND', Uri.parse(url))
         ..headers.addAll({
-          'Depth': '10',
+          'Depth': '20',
           'Authorization': authHeader,
           'Content-Type': 'application/xml',
         })
@@ -94,7 +149,7 @@ class NextcloudDAV {
 
       if (streamedResponse.statusCode >= 200 &&
           streamedResponse.statusCode < 300) {
-        await deserializePropFindReq(body);
+        await deserializePropFindReq(body, rootFolderId);
       } else {
         print(
           'Error: ${streamedResponse.statusCode} - ${streamedResponse.reasonPhrase}',
@@ -112,14 +167,14 @@ class NextcloudDAV {
     }
   }
 
-  Future<void> deserializePropFindReq(String xmlBody) async {
+  Future<void> deserializePropFindReq(String xmlBody, int rootFolderId) async {
     final document = XmlDocument.parse(xmlBody);
     final responses = document.findAllElements('d:response');
 
     final stmt = db.prepare('''
-      INSERT INTO syncTable (path, remoteLastModified, existsRemote, captured)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(path) DO UPDATE SET
+      INSERT INTO syncTable (path, remoteLastModified, existsRemote, captured, rootFolderId)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(rootFolderId, path) DO UPDATE SET
           remoteLastModified = excluded.remoteLastModified,
           existsRemote = TRUE,
           captured = excluded.captured;
@@ -168,6 +223,7 @@ class NextcloudDAV {
             dateTime.millisecondsSinceEpoch,
             1,
             captured,
+            rootFolderId,
           ]);
         }
       }
@@ -180,29 +236,32 @@ class NextcloudDAV {
     }
   }
 
-  Future<void> updateLocalFileList() async {
+  Future<void> updateLocalFileList(
+    String localRootPath,
+    int rootFolderId,
+  ) async {
     final stmt = db.prepare('''
-      INSERT INTO syncTable (path, localLastModified, existsLocal, captured)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(path) DO UPDATE SET
+      INSERT INTO syncTable (path, localLastModified, existsLocal, captured, rootFolderId)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(rootFolderId, path) DO UPDATE SET
           localLastModified = excluded.localLastModified,
           existsLocal = TRUE,
           captured = excluded.captured;
     ''');
 
-    final dir = Directory(localPath);
+    final dir = Directory(localRootPath);
     final allFiles = dir.listSync(recursive: true).whereType<File>().toList();
 
     db.execute('BEGIN');
     try {
       for (final file in allFiles) {
-        final relPath = p.relative(file.path, from: localPath);
+        final relPath = p.relative(file.path, from: localRootPath);
         final modTime =
             file.lastModifiedSync().millisecondsSinceEpoch /
             1000 *
             1000; // Round to seconds
 
-        stmt.execute([relPath, modTime, 1, captured]);
+        stmt.execute([relPath, modTime, 1, captured, rootFolderId]);
       }
       db.execute('COMMIT');
     } catch (e) {
@@ -218,11 +277,12 @@ class NextcloudDAV {
     return Uri.decodeFull(uri.pathSegments.skip(4).join('/'));
   }
 
-  Future<void> resolveConflicts() async {
+  Future<void> resolveConflicts(String localRootPath, int rootFolderId) async {
     // 1. Query for conflicting files
     final List<NextcloudFile> fileList = [];
 
-    final sqlString = '''
+    final sqlString =
+        '''
       SELECT *
       FROM syncTable
       WHERE
@@ -231,7 +291,8 @@ class NextcloudDAV {
         (remoteLastModifiedPrev != 0) AND
         (localLastModifiedPrev != 0) AND
         (existsRemote = TRUE) AND
-        (existsLocal = TRUE)
+        (existsLocal = TRUE) AND
+        (rootFolderId = $rootFolderId);
     ''';
 
     final result = db.select(sqlString);
@@ -239,7 +300,7 @@ class NextcloudDAV {
       final nextcloudFile = NextcloudFile(
         remoteUrl: remoteUrl,
         remoteLastModified: row['remoteLastModified'] as int,
-        localPath: p.join(localPath, row['path'] as String),
+        localPath: p.join(localRootPath, row['path'] as String),
         localLastModified: row['localLastModified'] as int,
         captured: row['captured'] as int,
       );
@@ -251,9 +312,9 @@ class NextcloudDAV {
 
     // 2. Prepare statement for inserting new conflict files
     final insertSql = '''
-    INSERT INTO syncTable (path, localLastModified, existsLocal, captured)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(path) DO UPDATE SET
+    INSERT INTO syncTable (path, localLastModified, existsLocal, captured, rootFolderId)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(rootFolderId, path) DO UPDATE SET
       localLastModified = excluded.localLastModified,
       existsLocal = TRUE,
       captured = excluded.captured;
@@ -280,10 +341,10 @@ class NextcloudDAV {
         final newFile = localFile.copySync(newFilePath);
 
         if (newFile.existsSync()) {
-          final relPath = p.relative(newFile.path, from: localPath);
+          final relPath = p.relative(newFile.path, from: localRootPath);
           final modTime =
               newFile.lastModifiedSync().millisecondsSinceEpoch ~/ 1000 * 1000;
-          insertStmt.execute([relPath, modTime, 1, captured]);
+          insertStmt.execute([relPath, modTime, 1, captured, rootFolderId]);
         }
       }
       db.execute('COMMIT');
@@ -295,15 +356,18 @@ class NextcloudDAV {
     }
   }
 
-  Future<void> download() async {
+  Future<void> download(String localRootPath, int rootFolderId) async {
     final List<NextcloudFile> downloadList = [];
     final pool = Pool(10); // Limit concurrent downloads
 
     // Load files from server which are not on client and have never been synced
-    var sqlString = '''
+    var sqlString =
+        '''
     SELECT *
     FROM syncTable
-    WHERE (existsLocal = FALSE) AND (synced = FALSE);
+    WHERE (existsLocal = FALSE) AND 
+    (synced = FALSE) AND 
+    (rootFolderId = $rootFolderId);
     ''';
 
     createNextcloudFileListFromQuery(
@@ -311,14 +375,18 @@ class NextcloudDAV {
       dbConnection: db,
       nextCloudFiles: downloadList,
       remoteBase: remoteUrl,
-      localBase: localPath,
+      localBase: localRootPath,
     );
 
     // Load files from server which are newer and have already been synced
-    sqlString = '''
+    sqlString =
+        '''
     SELECT *
     FROM syncTable
-    WHERE (remoteLastModified > localLastModified) AND (synced = TRUE);
+    WHERE 
+    (remoteLastModified > localLastModified) AND 
+    (synced = TRUE) AND 
+    (rootFolderId = $rootFolderId);
     ''';
 
     createNextcloudFileListFromQuery(
@@ -326,15 +394,16 @@ class NextcloudDAV {
       dbConnection: db,
       nextCloudFiles: downloadList,
       remoteBase: remoteUrl,
-      localBase: localPath,
+      localBase: localRootPath,
     );
 
-    final updateSql = '''
+    final updateSql =
+        '''
     UPDATE syncTable
     SET existsLocal = TRUE,
         localLastModified = ?,
         synced = TRUE
-    WHERE path = ?
+    WHERE path = ? AND rootFolderId = $rootFolderId
     ''';
 
     final stmt = db.prepare(updateSql);
@@ -349,6 +418,7 @@ class NextcloudDAV {
           await downloadRemoteFileAsync(
             nextcloudFile.remoteUrl,
             nextcloudFile.localPath,
+            localRootPath,
             nextcloudFile.remoteLastModified,
             stmt,
           );
@@ -365,6 +435,7 @@ class NextcloudDAV {
   Future<void> downloadRemoteFileAsync(
     String fileUri,
     String localFilePath,
+    String localRootPath,
     int lastModifiedTime,
     PreparedStatement stmt,
   ) async {
@@ -394,7 +465,7 @@ class NextcloudDAV {
       print('Downloaded $fileUri to $localFilePath');
 
       if (await file.exists()) {
-        final relPath = p.relative(file.path, from: localPath);
+        final relPath = p.relative(file.path, from: localRootPath);
         stmt.execute([lastModifiedTime, relPath]);
       }
     } catch (e) {
@@ -404,15 +475,23 @@ class NextcloudDAV {
     }
   }
 
-  Future<void> upload() async {
+  Future<void> upload(
+    String remoteRootPath,
+    String localRootPath,
+    int rootFolderId,
+  ) async {
     final List<NextcloudFile> uploadList = [];
     final pool = Pool(10); // Limit to 10 concurrent uploads
 
     // Files not on server and never synced
-    var sqlString = '''
+    var sqlString =
+        '''
     SELECT *
     FROM syncTable
-    WHERE (existsRemote = FALSE) AND (synced = FALSE);
+    WHERE (existsRemote = FALSE) AND 
+    (synced = FALSE) AND 
+    (rootFolderId = $rootFolderId)
+    ;
     ''';
 
     createNextcloudFileListFromQuery(
@@ -420,14 +499,15 @@ class NextcloudDAV {
       dbConnection: db,
       nextCloudFiles: uploadList,
       remoteBase: remoteUrl,
-      localBase: localPath,
+      localBase: localRootPath,
     );
 
     // Files newer locally and already synced
-    sqlString = '''
+    sqlString =
+        '''
     SELECT *
     FROM syncTable
-    WHERE (remoteLastModified < localLastModified) AND (synced = TRUE);
+    WHERE (remoteLastModified < localLastModified) AND (synced = TRUE) AND (rootFolderId = $rootFolderId);
     ''';
 
     createNextcloudFileListFromQuery(
@@ -435,15 +515,16 @@ class NextcloudDAV {
       dbConnection: db,
       nextCloudFiles: uploadList,
       remoteBase: remoteUrl,
-      localBase: localPath,
+      localBase: localRootPath,
     );
 
-    final updateSql = '''
+    final updateSql =
+        '''
       UPDATE syncTable
       SET existsRemote = TRUE,
           remoteLastModified = ?,
           synced = TRUE
-      WHERE path = ?
+      WHERE path = ? AND rootFolderId = $rootFolderId
     ''';
     final stmt = db.prepare(updateSql);
     db.execute('BEGIN');
@@ -458,6 +539,7 @@ class NextcloudDAV {
             nextcloudFile.remoteUrl,
             File(nextcloudFile.localPath),
             stmt,
+            localRootPath,
           );
         } finally {
           resource.release(); // Always release the resource
@@ -473,6 +555,7 @@ class NextcloudDAV {
     String remoteFileUrl,
     File localFile,
     PreparedStatement stmt,
+    String localRootPath,
   ) async {
     final client = http.Client();
 
@@ -481,7 +564,7 @@ class NextcloudDAV {
 
       final modTime =
           (localFile.lastModifiedSync().millisecondsSinceEpoch ~/ 1000);
-      final relPath = p.relative(localFile.path, from: localPath);
+      final relPath = p.relative(localFile.path, from: localRootPath);
 
       final request = http.Request('PUT', Uri.parse(remoteFileUrl))
         ..headers.addAll({
@@ -506,30 +589,37 @@ class NextcloudDAV {
     }
   }
 
-  Future<void> deleteOnRemote() async {
+  Future<void> deleteOnRemote(
+    String remoteRootPath,
+    String localRootPath,
+    int rootFolderId,
+  ) async {
     final List<NextcloudFile> deleteList = [];
     final pool = Pool(10); // Limit to 10 concurrent deletions (optional)
 
     // Query for files to delete on remote
-    final sqlString = '''
+    final sqlString =
+        '''
     SELECT * FROM syncTable
     WHERE
       (existsRemote = TRUE) AND
       (existsLocal = FALSE) AND
-      (synced = TRUE)
-  ''';
+      (synced = TRUE) AND
+      (rootFolderId = $rootFolderId);
+    ''';
 
     createNextcloudFileListFromQuery(
       sqlString: sqlString,
       dbConnection: db,
       nextCloudFiles: deleteList,
       remoteBase: remoteUrl,
-      localBase: localPath,
+      localBase: localRootPath,
     );
 
-    final deleteSql = '''
+    final deleteSql =
+        '''
     DELETE FROM syncTable
-    WHERE path = ?
+    WHERE path = ? AND rootFolderId = $rootFolderId;
     ''';
 
     final stmt = db.prepare(deleteSql);
@@ -578,22 +668,50 @@ class NextcloudDAV {
   }
 
   Future<bool> sync() async {
-    final bool returnValue = true;
+    bool returnValue = true;
     captured = DateTime.now().millisecondsSinceEpoch;
-    begin();
-    await updateRemoteFileList();
-    await updateLocalFileList();
-    await resolveConflicts();
-    await download();
-    await upload();
-    await deleteOnRemote();
-    await deleteOnLocal();
-    finish();
+
+    // Get all root folders from the database
+    final rootFolders = await getRootPaths();
+
+    if (rootFolders.isEmpty) {
+      print('No root folders found in the database.');
+      returnValue = false;
+    } else {
+      for (final rootFolder in rootFolders) {
+        begin(rootFolder.rootFolderId);
+        await updateRemoteFileList(
+          rootFolder.remoteRootPath,
+          rootFolder.rootFolderId,
+        );
+        await updateLocalFileList(
+          rootFolder.localRootPath,
+          rootFolder.rootFolderId,
+        );
+        await resolveConflicts(
+          rootFolder.localRootPath,
+          rootFolder.rootFolderId,
+        );
+        await download(rootFolder.localRootPath, rootFolder.rootFolderId);
+        await upload(
+          rootFolder.remoteRootPath,
+          rootFolder.localRootPath,
+          rootFolder.rootFolderId,
+        );
+        await deleteOnRemote(
+          rootFolder.remoteRootPath,
+          rootFolder.localRootPath,
+          rootFolder.rootFolderId,
+        );
+        await deleteOnLocal(rootFolder.localRootPath, rootFolder.rootFolderId);
+        finish(rootFolder.rootFolderId);
+      }
+    }
 
     return returnValue;
   }
 
-  Future<void> deleteOnLocal() async {
+  Future<void> deleteOnLocal(String localRootPath, int rootFolderId) async {
     final List<NextcloudFile> deleteList = [];
 
     // Query for files to delete locally
@@ -608,12 +726,13 @@ class NextcloudDAV {
       dbConnection: db,
       nextCloudFiles: deleteList,
       remoteBase: remoteUrl,
-      localBase: localPath,
+      localBase: localRootPath,
     );
 
-    final deleteSql = '''
+    final deleteSql =
+        '''
     DELETE FROM syncTable
-    WHERE path = ?
+    WHERE path = ? AND rootFolderId = $rootFolderId
     ''';
     final stmt = db.prepare(deleteSql);
 
@@ -632,7 +751,7 @@ class NextcloudDAV {
         }
         if (!deletedFile.existsSync()) {
           print('local file ${file.localPath} deleted');
-          final relPath = p.relative(deletedFile.path, from: localPath);
+          final relPath = p.relative(deletedFile.path, from: localRootPath);
           stmt.execute([relPath]);
         }
       }
@@ -644,20 +763,22 @@ class NextcloudDAV {
     }
   }
 
-  void finish() {
+  void finish(int rootFolderId) {
     db.execute('''
       UPDATE syncTable
       SET synced = TRUE
       WHERE existsRemote = TRUE AND
             existsLocal = TRUE AND
             localLastModified = remoteLastModified AND
-            synced = FALSE
+            synced = FALSE AND
+            rootFolderId = $rootFolderId;
     ''');
 
     db.execute('''
       UPDATE syncTable
       SET localLastModifiedPrev = localLastModified,
           remoteLastModifiedPrev = remoteLastModified
+      WHERE rootFolderId = $rootFolderId;
     ''');
   }
 

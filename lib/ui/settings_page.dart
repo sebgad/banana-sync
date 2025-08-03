@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:io' show Platform;
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 class SettingsPage extends StatefulWidget {
   final FlutterSecureStorage storage;
   final TextEditingController usernameController;
   final TextEditingController passwordController;
   final TextEditingController baseUrlController;
-  final TextEditingController localPathController;
 
   const SettingsPage({
     super.key,
@@ -14,7 +16,6 @@ class SettingsPage extends StatefulWidget {
     required this.usernameController,
     required this.passwordController,
     required this.baseUrlController,
-    required this.localPathController,
   });
 
   @override
@@ -22,6 +23,72 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  void _handleQrResult(String qr) {
+    // Example: nc://login/user:testuser&password:p1234&server:https://nextcloud.com
+    try {
+      final data = Uri.parse(qr);
+      if (data.scheme == 'nc') {
+        List<String> fields = data.path.substring(1).split("&");
+
+        for (String field in fields) {
+          List<String> keyValue = field.split(":");
+          if (keyValue.length == 2) {
+            switch (keyValue[0]) {
+              case 'user':
+                widget.usernameController.text = keyValue[1];
+                break;
+              case 'password':
+                widget.passwordController.text = keyValue[1];
+                break;
+              case 'server':
+                widget.baseUrlController.text = keyValue[1];
+                break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Invalid QR code: $e')));
+    }
+  }
+
+  Future<void> _scanQrCode() async {
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return Dialog(
+          child: SizedBox(
+            width: 300,
+            height: 400,
+            child: Stack(
+              children: [
+                MobileScanner(
+                  onDetect: (capture) {
+                    final barcode = capture.barcodes.first;
+                    if (barcode.rawValue != null) {
+                      Navigator.of(context).pop();
+                      _handleQrResult(barcode.rawValue!);
+                    }
+                  },
+                ),
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -32,13 +99,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final username = await widget.storage.read(key: 'username') ?? '';
     final password = await widget.storage.read(key: 'password') ?? '';
     final baseUrl = await widget.storage.read(key: 'baseUrl') ?? '';
-    final localPath = await widget.storage.read(key: 'localPath') ?? '';
 
     setState(() {
       widget.usernameController.text = username;
       widget.passwordController.text = password;
       widget.baseUrlController.text = baseUrl;
-      widget.localPathController.text = localPath;
     });
   }
 
@@ -54,10 +119,6 @@ class _SettingsPageState extends State<SettingsPage> {
     await widget.storage.write(
       key: 'baseUrl',
       value: widget.baseUrlController.text,
-    );
-    await widget.storage.write(
-      key: 'localPath',
-      value: widget.localPathController.text,
     );
     ScaffoldMessenger.of(
       context,
@@ -104,16 +165,38 @@ class _SettingsPageState extends State<SettingsPage> {
                   decoration: const InputDecoration(labelText: 'Base URL'),
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 8,
+              if (kIsWeb ||
+                  (Platform.isAndroid ||
+                      Platform.isIOS ||
+                      Platform.isMacOS ||
+                      Platform.isWindows))
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 8,
+                  ),
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Scan QR Code'),
+                    onPressed: _scanQrCode,
+                  ),
                 ),
-                child: TextField(
-                  controller: widget.localPathController,
-                  decoration: const InputDecoration(labelText: 'Local Path'),
+              if (kIsWeb ||
+                  (Platform.isAndroid ||
+                      Platform.isIOS ||
+                      Platform.isMacOS ||
+                      Platform.isWindows))
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 8,
+                  ),
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Scan QR Code'),
+                    onPressed: _scanQrCode,
+                  ),
                 ),
-              ),
               ElevatedButton(
                 onPressed: _saveCredentials,
                 child: const Text('Save Credentials'),
