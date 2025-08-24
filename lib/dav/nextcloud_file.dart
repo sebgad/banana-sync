@@ -1,11 +1,11 @@
-class NextcloudFile {
+class NextcloudSyncFile {
   final String remoteUrl;
   final int remoteLastModified;
   final String localPath;
   final int localLastModified;
   final int captured;
 
-  const NextcloudFile({
+  const NextcloudSyncFile({
     required this.remoteUrl,
     required this.remoteLastModified,
     required this.localPath,
@@ -15,13 +15,13 @@ class NextcloudFile {
 
   @override
   String toString() {
-    return 'NextcloudFile(remoteUrl: $remoteUrl, remoteLastModified: $remoteLastModified, localPath: $localPath, localLastModified: $localLastModified, captured: $captured)';
+    return 'NextcloudSyncFile(remoteUrl: $remoteUrl, remoteLastModified: $remoteLastModified, localPath: $localPath, localLastModified: $localLastModified, captured: $captured)';
   }
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is NextcloudFile &&
+      other is NextcloudSyncFile &&
           runtimeType == other.runtimeType &&
           remoteUrl == other.remoteUrl &&
           remoteLastModified == other.remoteLastModified &&

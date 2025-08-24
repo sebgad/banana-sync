@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:flutter/foundation.dart';
-import 'dart:io' show Platform;
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -165,38 +163,16 @@ class _SettingsPageState extends State<SettingsPage> {
                   decoration: const InputDecoration(labelText: 'Base URL'),
                 ),
               ),
-              if (kIsWeb ||
-                  (Platform.isAndroid ||
-                      Platform.isIOS ||
-                      Platform.isMacOS ||
-                      Platform.isWindows))
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 8,
-                  ),
-                  child: ElevatedButton.icon(
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: const Text('Scan QR Code'),
-                    onPressed: _scanQrCode,
-                  ),
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 8,
                 ),
-              if (kIsWeb ||
-                  (Platform.isAndroid ||
-                      Platform.isIOS ||
-                      Platform.isMacOS ||
-                      Platform.isWindows))
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 8,
-                  ),
-                  child: ElevatedButton.icon(
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: const Text('Scan QR Code'),
-                    onPressed: _scanQrCode,
-                  ),
+                child: ElevatedButton(
+                  onPressed: _scanQrCode,
+                  child: const Text('Scan QR Code'),
                 ),
+              ),
               ElevatedButton(
                 onPressed: _saveCredentials,
                 child: const Text('Save Credentials'),

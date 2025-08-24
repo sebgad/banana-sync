@@ -2,10 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:banana_sync/nextcloud_dav.dart';
+import 'package:banana_sync/dav/nextcloud_dav.dart';
 import 'package:banana_sync/ui/settings_page.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:file_selector/file_selector.dart';
 
 Future<String> getDatabasePath() async {
   final dir = await getApplicationDocumentsDirectory();
@@ -55,10 +56,12 @@ class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _baseUrlController = TextEditingController();
+  List<String> _availableRemotePaths = [];
+
   bool _isSyncing = false;
   List<RootPath> _rootPaths = [];
-  final TextEditingController _remoteRootPathController =
-      TextEditingController();
+  String? _selectedRemotePath;
+  bool _isInitialized = false;
   final TextEditingController _localRootPathController =
       TextEditingController();
 
@@ -67,7 +70,6 @@ class _MyHomePageState extends State<MyHomePage> {
     _usernameController.dispose();
     _passwordController.dispose();
     _baseUrlController.dispose();
-    _remoteRootPathController.dispose();
     _localRootPathController.dispose();
     super.dispose();
   }
@@ -92,7 +94,11 @@ class _MyHomePageState extends State<MyHomePage> {
         databasePath: File(databasePath),
       );
     });
+    await nextcloudDavClient.initDb();
     await _loadRootPaths();
+    setState(() {
+      _isInitialized = true;
+    });
   }
 
   Future<void> _loadRootPaths() async {
@@ -100,14 +106,20 @@ class _MyHomePageState extends State<MyHomePage> {
     setState(() {
       _rootPaths = paths;
     });
+    final remoteFileList = await nextcloudDavClient.getRemoteFileList();
+    setState(() {
+      _availableRemotePaths = remoteFileList
+          .where((file) => file.isFolder)
+          .map((file) => file.relativePath)
+          .toList();
+    });
   }
 
   Future<void> _addRootPath() async {
-    final remote = _remoteRootPathController.text.trim();
+    final remote = _selectedRemotePath?.trim() ?? '';
     final local = _localRootPathController.text.trim();
     if (remote.isEmpty || local.isEmpty) return;
     await nextcloudDavClient.addRootPath(remote, local);
-    _remoteRootPathController.clear();
     _localRootPathController.clear();
     await _loadRootPaths();
   }
@@ -127,6 +139,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_isInitialized) {
+      return const Center(child: CircularProgressIndicator());
+    }
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
@@ -156,6 +171,11 @@ class _MyHomePageState extends State<MyHomePage> {
                     baseUrlController: _baseUrlController,
                   ),
                 ),
+              );
+              nextcloudDavClient.setLogin(
+                _usernameController.text,
+                _passwordController.text,
+                _baseUrlController.text,
               );
             },
           ),
@@ -196,11 +216,57 @@ class _MyHomePageState extends State<MyHomePage> {
             child: Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _remoteRootPathController,
-                    decoration: const InputDecoration(
-                      labelText: 'Remote Root Path',
-                    ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _selectedRemotePath ?? 'No remote folder selected',
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.folder_open),
+                        tooltip: 'Pick Remote Folder',
+                        onPressed: () async {
+                          final selected = await showDialog<String>(
+                            context: context,
+                            builder: (context) {
+                              return AlertDialog(
+                                title: const Text('Select Remote Folder'),
+                                content: SizedBox(
+                                  width: 300,
+                                  height: 400,
+                                  child: ListView.builder(
+                                    itemCount: _availableRemotePaths.length,
+                                    itemBuilder: (context, index) {
+                                      final path = _availableRemotePaths[index];
+                                      return ListTile(
+                                        title: Text(path),
+                                        onTap: () {
+                                          Navigator.of(context).pop(path);
+                                        },
+                                      );
+                                    },
+                                  ),
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.of(context).pop(),
+                                    child: const Text('Cancel'),
+                                  ),
+                                ],
+                              );
+                            },
+                          );
+                          if (selected != null) {
+                            setState(() {
+                              _selectedRemotePath = selected;
+                            });
+                          }
+                        },
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -211,6 +277,18 @@ class _MyHomePageState extends State<MyHomePage> {
                       labelText: 'Local Root Path',
                     ),
                   ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.folder_open),
+                  tooltip: 'Pick Local Folder',
+                  onPressed: () async {
+                    final String? selectedDirectory = await getDirectoryPath();
+                    if (selectedDirectory != null) {
+                      setState(() {
+                        _localRootPathController.text = selectedDirectory;
+                      });
+                    }
+                  },
                 ),
                 IconButton(
                   icon: const Icon(Icons.add),
