@@ -7,6 +7,7 @@ import 'package:banana_sync/ui/settings_page.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:banana_sync/ui/add_folder.dart';
 
 Future<String> getDatabasePath() async {
   final dir = await getApplicationDocumentsDirectory();
@@ -115,14 +116,14 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
-  Future<void> _addRootPath() async {
-    final remote = _selectedRemotePath?.trim() ?? '';
-    final local = _localRootPathController.text.trim();
-    if (remote.isEmpty || local.isEmpty) return;
-    await nextcloudDavClient.addRootPath(remote, local);
-    _localRootPathController.clear();
-    await _loadRootPaths();
-  }
+  // Future<void> _addRootPath() async {
+  //   final remote = _selectedRemotePath?.trim() ?? '';
+  //   final local = _localRootPathController.text.trim();
+  //   if (remote.isEmpty || local.isEmpty) return;
+  //   await nextcloudDavClient.addRootPath(remote, local);
+  //   _localRootPathController.clear();
+  //   await _loadRootPaths();
+  // }
 
   Future<void> _syncNextcloud() async {
     setState(() {
@@ -158,6 +159,30 @@ class _MyHomePageState extends State<MyHomePage> {
           ],
         ),
         actions: [
+          // Add button for AddFolderPage
+          IconButton(
+            icon: const Icon(Icons.add),
+            tooltip: 'Add Sync Folder',
+            onPressed: () async {
+              final result = await Navigator.of(context)
+                  .push<Map<String, dynamic>>(
+                    MaterialPageRoute(
+                      builder: (context) => AddFolderPage(
+                        availableRemotePaths: _availableRemotePaths,
+                      ),
+                    ),
+                  );
+              if (result != null) {
+                // Use result['remote'], result['local'], result['picturesOnly'] as needed
+                await nextcloudDavClient.addRootPath(
+                  result['remote'] as String,
+                  result['local'] as String,
+                  result['picturesOnly'] as bool? ?? false,
+                );
+                await _loadRootPaths();
+              }
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',
@@ -289,11 +314,6 @@ class _MyHomePageState extends State<MyHomePage> {
                       });
                     }
                   },
-                ),
-                IconButton(
-                  icon: const Icon(Icons.add),
-                  tooltip: 'Add Root Folder',
-                  onPressed: _addRootPath,
                 ),
               ],
             ),
