@@ -25,11 +25,14 @@ class RootPath {
   /// The unique database ID for this root folder sync entry.
   final int rootFolderId;
 
+  final bool onlyImages;
+
   /// Creates a new root folder sync configuration.
   RootPath({
     required this.remoteRootPath,
     required this.localRootPath,
     required this.rootFolderId,
+    required this.onlyImages,
   });
 }
 
@@ -108,6 +111,7 @@ class NextcloudDAV {
         remoteRootPath: row['remoteRootPath'] as String,
         localRootPath: row['localRootPath'] as String,
         rootFolderId: row['id'] as int,
+        onlyImages: row['onlyImages'] as bool,
       );
     }).toList();
   }

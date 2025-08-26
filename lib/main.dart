@@ -6,7 +6,6 @@ import 'package:banana_sync/dav/nextcloud_dav.dart';
 import 'package:banana_sync/ui/settings_page.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:file_selector/file_selector.dart';
 import 'package:banana_sync/ui/add_folder.dart';
 
 Future<String> getDatabasePath() async {
@@ -28,7 +27,7 @@ class BananaSyncApp extends StatelessWidget {
       title: 'Banana Sync',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color.fromARGB(255, 211, 208, 12),
+          seedColor: const Color.fromARGB(255, 220, 240, 251),
         ),
       ),
       home: const MyHomePage(title: 'Banana Sync'),
@@ -61,7 +60,6 @@ class _MyHomePageState extends State<MyHomePage> {
 
   bool _isSyncing = false;
   List<RootPath> _rootPaths = [];
-  String? _selectedRemotePath;
   bool _isInitialized = false;
   final TextEditingController _localRootPathController =
       TextEditingController();
@@ -116,15 +114,6 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
-  // Future<void> _addRootPath() async {
-  //   final remote = _selectedRemotePath?.trim() ?? '';
-  //   final local = _localRootPathController.text.trim();
-  //   if (remote.isEmpty || local.isEmpty) return;
-  //   await nextcloudDavClient.addRootPath(remote, local);
-  //   _localRootPathController.clear();
-  //   await _loadRootPaths();
-  // }
-
   Future<void> _syncNextcloud() async {
     setState(() {
       _isSyncing = true;
@@ -145,13 +134,14 @@ class _MyHomePageState extends State<MyHomePage> {
     }
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: 108,
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Row(
           children: [
             Image.asset(
-              'assets/logo.png',
-              width: 48,
-              height: 48,
+              'assets/logo.jpeg',
+              width: 96,
+              height: 96,
               fit: BoxFit.contain,
             ),
             const SizedBox(width: 12),
@@ -209,113 +199,30 @@ class _MyHomePageState extends State<MyHomePage> {
       body: Column(
         children: [
           const SizedBox(height: 24),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Folder list:',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-          ),
           Expanded(
             child: ListView.builder(
               itemCount: _rootPaths.length,
               itemBuilder: (context, index) {
                 final root = _rootPaths[index];
-                return ListTile(
-                  leading: const Icon(Icons.folder),
-                  title: Text('Remote: ${root.remoteRootPath}'),
-                  subtitle: Text('Local: ${root.localRootPath}'),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    tooltip: 'Delete this sync folder',
-                    onPressed: () async {
-                      await _deleteRootPath(root.rootFolderId);
-                    },
+                return Card(
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  child: ListTile(
+                    leading: const Icon(Icons.folder),
+                    title: Text('Remote: ${root.remoteRootPath}'),
+                    subtitle: Text('Local: ${root.localRootPath}'),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      tooltip: 'Delete this sync folder',
+                      onPressed: () async {
+                        await _deleteRootPath(root.rootFolderId);
+                      },
+                    ),
                   ),
                 );
               },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _selectedRemotePath ?? 'No remote folder selected',
-                          style: Theme.of(context).textTheme.bodyMedium,
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.folder_open),
-                        tooltip: 'Pick Remote Folder',
-                        onPressed: () async {
-                          final selected = await showDialog<String>(
-                            context: context,
-                            builder: (context) {
-                              return AlertDialog(
-                                title: const Text('Select Remote Folder'),
-                                content: SizedBox(
-                                  width: 300,
-                                  height: 400,
-                                  child: ListView.builder(
-                                    itemCount: _availableRemotePaths.length,
-                                    itemBuilder: (context, index) {
-                                      final path = _availableRemotePaths[index];
-                                      return ListTile(
-                                        title: Text(path),
-                                        onTap: () {
-                                          Navigator.of(context).pop(path);
-                                        },
-                                      );
-                                    },
-                                  ),
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () =>
-                                        Navigator.of(context).pop(),
-                                    child: const Text('Cancel'),
-                                  ),
-                                ],
-                              );
-                            },
-                          );
-                          if (selected != null) {
-                            setState(() {
-                              _selectedRemotePath = selected;
-                            });
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: _localRootPathController,
-                    decoration: const InputDecoration(
-                      labelText: 'Local Root Path',
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.folder_open),
-                  tooltip: 'Pick Local Folder',
-                  onPressed: () async {
-                    final String? selectedDirectory = await getDirectoryPath();
-                    if (selectedDirectory != null) {
-                      setState(() {
-                        _localRootPathController.text = selectedDirectory;
-                      });
-                    }
-                  },
-                ),
-              ],
             ),
           ),
           const SizedBox(height: 8),
