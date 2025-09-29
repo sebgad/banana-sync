@@ -1,7 +1,7 @@
 import 'dart:io';
 
+import 'package:banana_sync/dav/credentials.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:banana_sync/dav/nextcloud_dav.dart';
 import 'package:banana_sync/ui/settings_page.dart';
 import 'package:path/path.dart' as p;
@@ -45,34 +45,25 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
+  late NextcloudDAV nextcloudDavClient;
+
+  bool _isSyncing = false;
+  List<RootPath> _rootPaths = [];
+  bool _isInitialized = false;
+  final CredentialsStorage _credentialsStorage = CredentialsStorage();
+
+  /// Deletes a root sync folder by its ID and reloads the list of root paths.
+  ///
+  /// [rootFolderId] is the unique identifier of the root folder to delete.
   Future<void> _deleteRootPath(int rootFolderId) async {
     await nextcloudDavClient.deleteRootPathById(rootFolderId);
     await _loadRootPaths();
   }
 
-  late NextcloudDAV nextcloudDavClient;
-  late final FlutterSecureStorage storage = const FlutterSecureStorage();
-
-  final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _passwordController = TextEditingController();
-  final TextEditingController _baseUrlController = TextEditingController();
-  List<String> _availableRemotePaths = [];
-
-  bool _isSyncing = false;
-  List<RootPath> _rootPaths = [];
-  bool _isInitialized = false;
-  final TextEditingController _localRootPathController =
-      TextEditingController();
-
-  @override
-  void dispose() {
-    _usernameController.dispose();
-    _passwordController.dispose();
-    _baseUrlController.dispose();
-    _localRootPathController.dispose();
-    super.dispose();
-  }
-
+  /// Initializes the state of the home page widget.
+  ///
+  /// This method is called once when the widget is inserted into the widget tree.
+  /// It initializes the NextcloudDAV client and loads credentials/database state.
   @override
   void initState() {
     super.initState();
@@ -81,36 +72,43 @@ class _MyHomePageState extends State<MyHomePage> {
 
   Future<void> _initNextcloudDavClient() async {
     final databasePath = await getDatabasePath();
-    final String username = await storage.read(key: 'username') ?? 'na';
-    final String password = await storage.read(key: 'password') ?? 'na';
-    final String baseUrl = await storage.read(key: 'baseUrl') ?? 'na';
 
     setState(() {
-      nextcloudDavClient = NextcloudDAV(
-        baseUrl: baseUrl,
-        username: username,
-        password: password,
-        databasePath: File(databasePath),
-      );
+      nextcloudDavClient = NextcloudDAV(databasePath: File(databasePath));
     });
     await nextcloudDavClient.initDb();
+    if (!await _credentialsStorage.hasCredentials()) {
+      // If no credentials are stored, skip initialization
+      setState(() {
+        _isInitialized = true;
+      });
+      return;
+    }
+
+    final username = await _credentialsStorage.getUsername();
+    final password = await _credentialsStorage.getPassword();
+    final baseUrl = await _credentialsStorage.getBaseUrl();
+
+    nextcloudDavClient.setLogin(username, password, baseUrl);
     await _loadRootPaths();
     setState(() {
       _isInitialized = true;
     });
   }
 
+  Future<List<String>> _loadRemotePaths() async {
+    final remoteFolderList = await nextcloudDavClient.getRemoteFileList();
+    final List<String> remoteFilteredFolderList = remoteFolderList
+        .where((file) => file.isFolder)
+        .map((file) => file.relativePath)
+        .toList();
+    return remoteFilteredFolderList;
+  }
+
   Future<void> _loadRootPaths() async {
     final paths = await nextcloudDavClient.getRootPaths();
     setState(() {
       _rootPaths = paths;
-    });
-    final remoteFileList = await nextcloudDavClient.getRemoteFileList();
-    setState(() {
-      _availableRemotePaths = remoteFileList
-          .where((file) => file.isFolder)
-          .map((file) => file.relativePath)
-          .toList();
     });
   }
 
@@ -139,7 +137,7 @@ class _MyHomePageState extends State<MyHomePage> {
         title: Row(
           children: [
             Image.asset(
-              'assets/logo.jpeg',
+              'assets/logo.png',
               width: 96,
               height: 96,
               fit: BoxFit.contain,
@@ -154,20 +152,63 @@ class _MyHomePageState extends State<MyHomePage> {
             icon: const Icon(Icons.add),
             tooltip: 'Add Sync Folder',
             onPressed: () async {
+              if (!await _credentialsStorage.hasCredentials()) {
+                // Show dialog informing the user to set credentials first
+                showDialog(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: const Text('No Credentials Set'),
+                    content: const Text(
+                      'Please set your Nextcloud credentials in the settings before adding a sync folder.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('OK'),
+                      ),
+                    ],
+                  ),
+                );
+                return;
+              }
+              final remotePaths = await _loadRemotePaths();
               final result = await Navigator.of(context)
                   .push<Map<String, dynamic>>(
                     MaterialPageRoute(
-                      builder: (context) => AddFolderPage(
-                        availableRemotePaths: _availableRemotePaths,
-                      ),
+                      builder: (context) =>
+                          AddFolderPage(availableRemotePaths: remotePaths),
                     ),
                   );
               if (result != null) {
                 // Use result['remote'], result['local'], result['picturesOnly'] as needed
+                List<String> allowedFileExtensions;
+
+                if (result['picturesOnly'] == true) {
+                  allowedFileExtensions = [
+                    '.jpg',
+                    '.jpeg',
+                    '.png',
+                    '.gif',
+                    '.bmp',
+                    '.webp',
+                    '.mp4',
+                    '.mov',
+                    '.avi',
+                    '.mkv',
+                    '.flv',
+                    '.wmv',
+                    '.heic',
+                    '.heif',
+                    '.tiff',
+                  ];
+                } else {
+                  allowedFileExtensions = ['.*'];
+                }
+
                 await nextcloudDavClient.addRootPath(
                   result['remote'] as String,
                   result['local'] as String,
-                  result['picturesOnly'] as bool? ?? false,
+                  allowedFileExtensions,
                 );
                 await _loadRootPaths();
               }
@@ -176,22 +217,19 @@ class _MyHomePageState extends State<MyHomePage> {
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (context) => SettingsPage(
-                    storage: storage,
-                    usernameController: _usernameController,
-                    passwordController: _passwordController,
-                    baseUrlController: _baseUrlController,
-                  ),
-                ),
-              );
+            onPressed: () async {
+              Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (context) => SettingsPage()));
               nextcloudDavClient.setLogin(
-                _usernameController.text,
-                _passwordController.text,
-                _baseUrlController.text,
+                await _credentialsStorage.getUsername(),
+                await _credentialsStorage.getPassword(),
+                await _credentialsStorage.getBaseUrl(),
               );
+
+              if (!await _credentialsStorage.hasCredentials()) {
+                return;
+              }
             },
           ),
         ],
@@ -229,7 +267,28 @@ class _MyHomePageState extends State<MyHomePage> {
           _isSyncing
               ? const CircularProgressIndicator()
               : ElevatedButton(
-                  onPressed: _syncNextcloud,
+                  onPressed: () async {
+                    if (!await _credentialsStorage.hasCredentials()) {
+                      // Show dialog informing the user to set credentials first
+                      showDialog(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('No Credentials Set'),
+                          content: const Text(
+                            'Please set your Nextcloud credentials in the settings before syncing.',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(),
+                              child: const Text('OK'),
+                            ),
+                          ],
+                        ),
+                      );
+                      return;
+                    }
+                    _syncNextcloud();
+                  },
                   child: const Text('Sync Nextcloud'),
                 ),
           const SizedBox(height: 16),

@@ -28,24 +28,24 @@ environment:
 # the latest version available on pub.dev. To see which dependencies have newer
 # versions available, run `flutter pub outdated`.
 dependencies:
-  http:
-  path:
-  xml:
-  sqflite:
-  ffi:
+  http: ^1.5.0
+  path: ^1.9.1
+  xml: ^6.6.1
+  sqflite: ^2.4.2
+  ffi: ^2.1.4
   flutter:
     sdk: flutter
-  intl:
-  pool:
-  path_provider:
-  flutter_secure_storage:
-  mobile_scanner:
-  file_selector:
-  logger:
+  intl: ^0.20.2
+  pool: ^1.5.2
+  path_provider: ^2.1.5
+  flutter_secure_storage: ^9.2.4
+  file_selector: ^1.0.4
+  logger: ^2.6.1
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  mobile_scanner: ^7.1.2
 
 dev_dependencies:
   flutter_test:
@@ -64,7 +64,7 @@ dev_dependencies:
 # The following section is specific to Flutter packages.
 flutter:
   assets:
-    - assets/logo.jpeg
+    - assets/logo.png
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.

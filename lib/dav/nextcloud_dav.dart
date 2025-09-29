@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:banana_sync/dav/dav_sync.dart';
-import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:banana_sync/dav/misc.dart';
 import 'package:banana_sync/dav/nextcloud_file.dart';
@@ -25,14 +24,14 @@ class RootPath {
   /// The unique database ID for this root folder sync entry.
   final int rootFolderId;
 
-  final bool onlyImages;
+  final List<String> allowedFileExtensions;
 
   /// Creates a new root folder sync configuration.
   RootPath({
     required this.remoteRootPath,
     required this.localRootPath,
     required this.rootFolderId,
-    required this.onlyImages,
+    required this.allowedFileExtensions,
   });
 }
 
@@ -51,24 +50,21 @@ class RootPath {
 /// - Resolve sync conflicts and handle deletions
 /// - Provide a single `sync()` method to synchronize all configured folders
 class NextcloudDAV {
-  String baseUrl;
-  String username;
-  String password;
-  String remoteUrl;
+  late String baseUrl;
+  late String username;
+  late String password;
+  late String remoteUrl;
   final File databasePath;
 
   late Database db;
-  String authHeader;
+  late String authHeader;
+
+  bool hasLogin = false;
   int captured = 0;
+
   final logger = Logger();
 
-  NextcloudDAV({
-    required this.baseUrl,
-    required this.username,
-    required this.password,
-    required this.databasePath,
-  }) : remoteUrl = '$baseUrl/remote.php/dav/files/$username',
-       authHeader = 'Basic ${base64Encode(utf8.encode('$username:$password'))}';
+  NextcloudDAV({required this.databasePath});
 
   /// Initializes the SQLite database connection.
   ///
@@ -78,20 +74,61 @@ class NextcloudDAV {
     await createSyncDatabase();
   }
 
+  /// Checks if the remote server is a Nextcloud instance by looking for Nextcloud-specific headers or content.
+  Future<bool> isNextcloudServer() async {
+    final client = HttpClient();
+    bool isNextcloud = false;
+    try {
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) {
+            logger.e('Self-signed or invalid certificate detected for $host');
+            return false;
+          };
+      final url = Uri.parse(baseUrl);
+      final request = await client.getUrl(url);
+      request.headers.set('Authorization', authHeader);
+      final response = await request.close();
+      // Check for Nextcloud header
+      if (response.headers.value('X-Nextcloud') != null) {
+        isNextcloud = true;
+      } else {
+        // Fallback: check for Nextcloud branding in HTML
+        final body = await response.transform(utf8.decoder).join();
+        if (body.contains('nextcloud') || body.contains('Nextcloud')) {
+          isNextcloud = true;
+          logger.i('Nextcloud branding found in HTML content.');
+        }
+      }
+    } catch (e) {
+      logger.e('Error checking Nextcloud server: $e');
+    } finally {
+      client.close();
+    }
+    if (!isNextcloud) {
+      logger.e('Remote server does not appear to be a Nextcloud instance.');
+    }
+    return isNextcloud;
+  }
+
   /// Adds a new root folder sync configuration to the database.
   /// [remoteRootPath] The remote root path on Nextcloud.
   /// [localRootPath] The local root path on disk.
   Future<void> addRootPath(
     String remoteRootPath,
     String localRootPath,
-    bool onlyImages,
+    List<String> allowedFileExtensions,
   ) async {
+    // Normalize extensions to lowercase
+    allowedFileExtensions = allowedFileExtensions
+        .map((e) => e.toLowerCase())
+        .toList();
+
     db.execute('''
-      INSERT INTO rootFolder (remoteRootPath, localRootPath, onlyImages)
-      VALUES ("$remoteRootPath", "$localRootPath", $onlyImages)
+      INSERT INTO rootFolder (remoteRootPath, localRootPath, allowedFileExtensions)
+      VALUES ("$remoteRootPath", "$localRootPath", "${allowedFileExtensions.join(',')}")
     ''');
     logger.i(
-      'Added root path: $remoteRootPath -> $localRootPath, onlyImages: $onlyImages',
+      'Added root path: $remoteRootPath -> $localRootPath, allowedFileExtensions: $allowedFileExtensions',
     );
   }
 
@@ -107,11 +144,14 @@ class NextcloudDAV {
   Future<List<RootPath>> getRootPaths() async {
     final result = await db.query('rootFolder');
     return result.map((row) {
+      final allowedExtensionString = row['allowedFileExtensions'] as String;
+      final allowedExtensions = allowedExtensionString.split(',');
+
       return RootPath(
         remoteRootPath: row['remoteRootPath'] as String,
         localRootPath: row['localRootPath'] as String,
         rootFolderId: row['id'] as int,
-        onlyImages: row['onlyImages'] as bool,
+        allowedFileExtensions: allowedExtensions,
       );
     }).toList();
   }
@@ -139,7 +179,7 @@ class NextcloudDAV {
         id INTEGER PRIMARY KEY,
         remoteRootPath TEXT NOT NULL,
         localRootPath TEXT NOT NULL,
-        onlyImages BOOLEAN NOT NULL DEFAULT FALSE
+        allowedFileExtensions TEXT NOT NULL DEFAULT '.*'
       );
     ''');
   }
@@ -161,6 +201,7 @@ class NextcloudDAV {
     this.baseUrl = baseUrl;
     remoteUrl = '$baseUrl/remote.php/dav/files/$username';
     authHeader = 'Basic ${base64Encode(utf8.encode('$username:$password'))}';
+    hasLogin = true;
   }
 
   /// Retrieves a list of remote files and folders from the Nextcloud server using WebDAV PROPFIND.
@@ -181,25 +222,35 @@ class NextcloudDAV {
   }) async {
     final url = Uri.parse('$remoteUrl/$remoteRootPath');
     logger.i("Fetching remote file list from: $url");
-    final nextcloudPropFind = NextcloudDavPropFindResponse();
-    final request = http.Request('PROPFIND', url)
-      ..headers.addAll({
-        'Depth': depth.toString(),
-        'Authorization': authHeader,
-        'Content-Type': 'application/xml',
-      })
-      ..body = nextcloudPropFind.getPropfindXmlRequestBody();
 
-    final client = http.Client();
+    final nextcloudPropFind = NextcloudDavPropFindResponse();
+    final xmlBody = nextcloudPropFind.getPropfindXmlRequestBody();
+
+    final client = HttpClient();
     try {
-      final response = await client.send(request);
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) {
+            // Reject self-signed or invalid certificates
+            logger.e('Self-signed or invalid certificate detected for $host');
+            return false;
+          };
+
+      final request = await client.openUrl('PROPFIND', url);
+      request.headers.set('Depth', depth.toString());
+      request.headers.set('Authorization', authHeader);
+      request.headers.set('Content-Type', 'application/xml');
+      request.add(utf8.encode(xmlBody));
+
+      final response = await request.close();
       if (response.statusCode >= 200 && response.statusCode < 300) {
-        final body = await response.stream.bytesToString();
+        final body = await response.transform(utf8.decoder).join();
         await nextcloudPropFind.deserialize(body);
         return nextcloudPropFind.getDavObjects();
       } else {
-        logger.e('Error: ${response.statusCode} - ${response.reasonPhrase}');
+        logger.e('Error: ${response.statusCode}');
       }
+    } catch (e) {
+      logger.e('Error during PROPFIND: $e');
     } finally {
       client.close();
     }
@@ -221,12 +272,26 @@ class NextcloudDAV {
   Future<void> updateRemoteFileList(
     String remoteRootPath,
     int rootFolderId,
+    List<String> allowedFileExtensions,
   ) async {
     final davObjects = await getRemoteFileList(remoteRootPath: remoteRootPath);
+
+    logger.i('Updating remote file list for remote folder: $remoteRootPath');
 
     await db.transaction((txn) async {
       for (final object in davObjects) {
         if (object.isFolder) continue;
+        if (!allowedFileExtensions.contains('.*')) {
+          // Filter by allowed extensions
+          final String extension = p
+              .extension(object.relativePath)
+              .toLowerCase();
+
+          if (!allowedFileExtensions.contains(extension)) {
+            continue;
+          }
+        }
+
         await txn.rawInsert(
           '''
         INSERT INTO syncTable (path, remoteLastModified, existsRemote, captured, rootFolderId)
@@ -251,12 +316,24 @@ class NextcloudDAV {
   Future<void> updateLocalFileList(
     String localRootPath,
     int rootFolderId,
+    List<String> allowedFileExtensions,
   ) async {
     final dir = Directory(localRootPath);
     final allFiles = dir.listSync(recursive: true).whereType<File>().toList();
 
+    logger.i('Updating local file list for local folder: $localRootPath');
+
     await db.transaction((txn) async {
       for (final file in allFiles) {
+        if (!allowedFileExtensions.contains('.*')) {
+          // Filter by allowed extensions
+          final String extension = p.extension(file.path);
+
+          if (!allowedFileExtensions.contains(extension)) {
+            continue;
+          }
+        }
+
         final relPath = p.relative(file.path, from: localRootPath);
         final modTime =
             file.lastModifiedSync().millisecondsSinceEpoch ~/
@@ -286,6 +363,8 @@ class NextcloudDAV {
   Future<void> resolveConflicts(String localRootPath, int rootFolderId) async {
     // 1. Query for conflicting files
     final List<NextcloudSyncFile> fileList = [];
+
+    logger.i('Resolving conflicts for local folder: $localRootPath');
 
     final sqlString =
         '''
@@ -358,6 +437,8 @@ class NextcloudDAV {
   Future<void> download(String localRootPath, int rootFolderId) async {
     final List<NextcloudSyncFile> downloadList = [];
     final pool = Pool(10); // Limit concurrent downloads
+
+    logger.i('Preparing downloads for local folder: $localRootPath');
 
     // Load files from server which are not on client and have never been synced
     var sqlString =
@@ -441,15 +522,21 @@ class NextcloudDAV {
     String localRootPath,
     int lastModifiedTime,
   ) async {
-    final client = http.Client();
+    final client = HttpClient();
     bool success = false;
 
     try {
-      final request = http.Request('GET', Uri.parse(fileUri))
-        ..headers.addAll({'Authorization': authHeader});
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) {
+            logger.e('Self-signed or invalid certificate detected for $host');
+            return false;
+          };
 
-      final response = await client.send(request);
+      final url = Uri.parse(fileUri);
+      final request = await client.openUrl('GET', url);
+      request.headers.set('Authorization', authHeader);
 
+      final response = await request.close();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         logger.e('Failed to download $fileUri: ${response.statusCode}');
         return success;
@@ -459,7 +546,7 @@ class NextcloudDAV {
       await file.parent.create(recursive: true);
 
       final sink = file.openWrite();
-      await response.stream.pipe(sink);
+      await response.pipe(sink);
       await sink.close();
 
       await file.setLastModified(
@@ -485,6 +572,8 @@ class NextcloudDAV {
   ) async {
     final List<NextcloudSyncFile> uploadList = [];
     final pool = Pool(10); // Limit to 10 concurrent uploads
+
+    logger.i('Preparing uploads for local folder: $localRootPath');
 
     // Files not on server and never synced
     var sqlString =
@@ -568,22 +657,27 @@ class NextcloudDAV {
     File localFile,
     String localRootPath,
   ) async {
-    final client = http.Client();
+    final client = HttpClient();
     bool success = false;
 
     try {
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) {
+            logger.e('Self-signed or invalid certificate detected for $host');
+            return false;
+          };
+
       logger.i('start uploading $remoteFileUrl...');
       final modTime =
           (localFile.lastModifiedSync().millisecondsSinceEpoch ~/ 1000);
-      final request = http.Request('PUT', Uri.parse(remoteFileUrl))
-        ..headers.addAll({
-          'Authorization': authHeader,
-          'Content-Type': 'application/octet-stream',
-          'X-OC-MTime': modTime.toString(),
-        })
-        ..bodyBytes = await localFile.readAsBytes();
+      final url = Uri.parse(remoteFileUrl);
+      final request = await client.openUrl('PUT', url);
+      request.headers.set('Authorization', authHeader);
+      request.headers.set('Content-Type', 'application/octet-stream');
+      request.headers.set('X-OC-MTime', modTime.toString());
+      request.add(await localFile.readAsBytes());
 
-      final response = await client.send(request);
+      final response = await request.close();
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         logger.e('Failed to upload ${localFile.path}: ${response.statusCode}');
@@ -608,6 +702,8 @@ class NextcloudDAV {
   ) async {
     final List<NextcloudSyncFile> deleteList = [];
     final pool = Pool(10); // Limit to 10 concurrent deletions (optional)
+
+    logger.i('Preparing deletions for remote folder: $remoteRootPath');
 
     // Query for files to delete on remote
     final sqlString =
@@ -655,14 +751,21 @@ class NextcloudDAV {
   }
 
   Future<bool> deleteOnRemoteAsync(String fileUri) async {
-    final client = http.Client();
+    final client = HttpClient();
     bool success = false;
 
     try {
-      final request = http.Request('DELETE', Uri.parse(fileUri))
-        ..headers.addAll({'Authorization': authHeader});
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) {
+            logger.e('Self-signed or invalid certificate detected for $host');
+            return false;
+          };
 
-      final response = await client.send(request);
+      final url = Uri.parse(fileUri);
+      final request = await client.openUrl('DELETE', url);
+      request.headers.set('Authorization', authHeader);
+
+      final response = await request.close();
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         logger.e('Failed to delete $fileUri: ${response.statusCode}');
@@ -684,6 +787,12 @@ class NextcloudDAV {
     bool returnValue = true;
     captured = DateTime.now().millisecondsSinceEpoch;
 
+    // Initial Nextcloud server check
+    if (!await isNextcloudServer()) {
+      logger.e('Aborting sync: remote server is not Nextcloud.');
+      return false;
+    }
+
     // Get all root folders from the database
     final rootFolders = await getRootPaths();
 
@@ -696,10 +805,12 @@ class NextcloudDAV {
         await updateRemoteFileList(
           rootFolder.remoteRootPath,
           rootFolder.rootFolderId,
+          rootFolder.allowedFileExtensions,
         );
         await updateLocalFileList(
           rootFolder.localRootPath,
           rootFolder.rootFolderId,
+          rootFolder.allowedFileExtensions,
         );
         await resolveConflicts(
           rootFolder.localRootPath,
@@ -733,6 +844,8 @@ class NextcloudDAV {
     FROM syncTable
     WHERE (existsRemote = FALSE) AND (synced = TRUE);
     ''';
+
+    logger.i('Preparing deletions for local folder: $localRootPath');
 
     createNextcloudFileListFromQuery(
       sqlString: sqlString,

@@ -1,45 +1,38 @@
+import 'package:banana_sync/dav/credentials.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 class SettingsPage extends StatefulWidget {
-  final FlutterSecureStorage storage;
-  final TextEditingController usernameController;
-  final TextEditingController passwordController;
-  final TextEditingController baseUrlController;
-
-  const SettingsPage({
-    super.key,
-    required this.storage,
-    required this.usernameController,
-    required this.passwordController,
-    required this.baseUrlController,
-  });
+  const SettingsPage({super.key});
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  final _credentials = CredentialsStorage();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _baseUrlController = TextEditingController();
+
   void _handleQrResult(String qr) {
     // Example: nc://login/user:testuser&password:p1234&server:https://nextcloud.com
     try {
       final data = Uri.parse(qr);
       if (data.scheme == 'nc') {
         List<String> fields = data.path.substring(1).split("&");
-
         for (String field in fields) {
           List<String> keyValue = field.split(":");
           if (keyValue.length == 2) {
             switch (keyValue[0]) {
               case 'user':
-                widget.usernameController.text = keyValue[1];
+                _usernameController.text = keyValue[1];
                 break;
               case 'password':
-                widget.passwordController.text = keyValue[1];
+                _passwordController.text = keyValue[1];
                 break;
               case 'server':
-                widget.baseUrlController.text = keyValue[1];
+                _baseUrlController.text = keyValue[1];
                 break;
             }
           }
@@ -94,33 +87,29 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _loadCredentials() async {
-    final username = await widget.storage.read(key: 'username') ?? '';
-    final password = await widget.storage.read(key: 'password') ?? '';
-    final baseUrl = await widget.storage.read(key: 'baseUrl') ?? '';
-
+    final username = await _credentials.getUsername();
+    final password = await _credentials.getPassword();
+    final baseUrl = await _credentials.getBaseUrl();
     setState(() {
-      widget.usernameController.text = username;
-      widget.passwordController.text = password;
-      widget.baseUrlController.text = baseUrl;
+      _usernameController.text = username;
+      _passwordController.text = password;
+      _baseUrlController.text = baseUrl;
     });
   }
 
   Future<void> _saveCredentials() async {
-    await widget.storage.write(
-      key: 'username',
-      value: widget.usernameController.text,
-    );
-    await widget.storage.write(
-      key: 'password',
-      value: widget.passwordController.text,
-    );
-    await widget.storage.write(
-      key: 'baseUrl',
-      value: widget.baseUrlController.text,
-    );
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Credentials saved!')));
+    await _credentials.setUsername(_usernameController.text);
+    await _credentials.setPassword(_passwordController.text);
+    await _credentials.setBaseUrl(_baseUrlController.text);
+  }
+
+  @override
+  void dispose() {
+    _saveCredentials();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    _baseUrlController.dispose();
+    super.dispose();
   }
 
   @override
@@ -138,7 +127,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   vertical: 8,
                 ),
                 child: TextField(
-                  controller: widget.usernameController,
+                  controller: _usernameController,
                   decoration: const InputDecoration(labelText: 'Username'),
                 ),
               ),
@@ -148,7 +137,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   vertical: 8,
                 ),
                 child: TextField(
-                  controller: widget.passwordController,
+                  controller: _passwordController,
                   decoration: const InputDecoration(labelText: 'Password'),
                   obscureText: true,
                 ),
@@ -159,7 +148,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   vertical: 8,
                 ),
                 child: TextField(
-                  controller: widget.baseUrlController,
+                  controller: _baseUrlController,
                   decoration: const InputDecoration(labelText: 'Base URL'),
                 ),
               ),
@@ -173,10 +162,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   child: const Text('Scan QR Code'),
                 ),
               ),
-              ElevatedButton(
-                onPressed: _saveCredentials,
-                child: const Text('Save Credentials'),
-              ),
+              // Removed Save Credentials button; credentials are now saved automatically on page close.
             ],
           ),
         ),
