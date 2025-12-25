@@ -58,6 +58,8 @@ class NextcloudDAV {
 
   late Database db;
   late String authHeader;
+  late final HttpClient _httpClient = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 30);
 
   bool hasLogin = false;
   int captured = 0;
@@ -76,7 +78,7 @@ class NextcloudDAV {
 
   /// Checks if the remote server is a Nextcloud instance by looking for Nextcloud-specific headers or content.
   Future<bool> isNextcloudServer() async {
-    final client = HttpClient();
+    final client = _httpClient;
     bool isNextcloud = false;
     try {
       client.badCertificateCallback =
@@ -101,8 +103,6 @@ class NextcloudDAV {
       }
     } catch (e) {
       logger.e('Error checking Nextcloud server: $e');
-    } finally {
-      client.close();
     }
     if (!isNextcloud) {
       logger.e('Remote server does not appear to be a Nextcloud instance.');
@@ -226,8 +226,8 @@ class NextcloudDAV {
     final nextcloudPropFind = NextcloudDavPropFindResponse();
     final xmlBody = nextcloudPropFind.getPropfindXmlRequestBody();
 
-    final client = HttpClient();
     try {
+      final client = _httpClient;
       client.badCertificateCallback =
           (X509Certificate cert, String host, int port) {
             // Reject self-signed or invalid certificates
@@ -251,8 +251,6 @@ class NextcloudDAV {
       }
     } catch (e) {
       logger.e('Error during PROPFIND: $e');
-    } finally {
-      client.close();
     }
 
     return <NextcloudDavProp>[];
@@ -291,7 +289,6 @@ class NextcloudDAV {
             continue;
           }
         }
-
         await txn.rawInsert(
           '''
         INSERT INTO syncTable (path, remoteLastModified, existsRemote, captured, rootFolderId)
@@ -319,12 +316,27 @@ class NextcloudDAV {
     List<String> allowedFileExtensions,
   ) async {
     final dir = Directory(localRootPath);
-    final allFiles = dir.listSync(recursive: true).whereType<File>().toList();
+
+    if (!dir.existsSync()) {
+      logger.e('Local directory does not exist: $localRootPath');
+      return;
+    }
+
+    List<File> allFiles;
+    try {
+      allFiles = dir.listSync(recursive: true).whereType<File>().toList();
+    } catch (e) {
+      logger.e('Error listing files in $localRootPath: $e');
+      return;
+    }
 
     logger.i('Updating local file list for local folder: $localRootPath');
+    logger.i('Found ${allFiles.length} files in $localRootPath');
 
     await db.transaction((txn) async {
       for (final file in allFiles) {
+        //logger.i('Processing local file: ${file.path}');
+
         if (!allowedFileExtensions.contains('.*')) {
           // Filter by allowed extensions
           final String extension = p.extension(file.path);
@@ -346,7 +358,7 @@ class NextcloudDAV {
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(rootFolderId, path) DO UPDATE SET
             localLastModified = excluded.localLastModified,
-            existsLocal = TRUE,
+            existsLocal = 1,
             captured = excluded.captured;
       ''',
           [relPath, modTime, 1, captured, rootFolderId],
@@ -375,8 +387,8 @@ class NextcloudDAV {
         (remoteLastModifiedPrev != remoteLastModified) AND
         (remoteLastModifiedPrev != 0) AND
         (localLastModifiedPrev != 0) AND
-        (existsRemote = TRUE) AND
-        (existsLocal = TRUE) AND
+        (existsRemote = 1) AND
+        (existsLocal = 1) AND
         (rootFolderId = $rootFolderId);
     ''';
 
@@ -424,7 +436,7 @@ class NextcloudDAV {
           VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(rootFolderId, path) DO UPDATE SET
             localLastModified = excluded.localLastModified,
-            existsLocal = TRUE,
+            existsLocal = 1,
             captured = excluded.captured;
           ''',
             [relPath, modTime, 1, captured, rootFolderId],
@@ -445,8 +457,8 @@ class NextcloudDAV {
         '''
     SELECT *
     FROM syncTable
-    WHERE (existsLocal = FALSE) AND 
-    (synced = FALSE) AND 
+    WHERE (existsLocal = 0) AND 
+    (synced = 0) AND 
     (rootFolderId = $rootFolderId);
     ''';
 
@@ -465,7 +477,7 @@ class NextcloudDAV {
     FROM syncTable
     WHERE 
     (remoteLastModified > localLastModified) AND 
-    (synced = TRUE) AND 
+    (synced = 1) AND 
     (rootFolderId = $rootFolderId);
     ''';
 
@@ -480,9 +492,9 @@ class NextcloudDAV {
     final updateSql =
         '''
     UPDATE syncTable
-    SET existsLocal = TRUE,
+    SET existsLocal = 1,
         localLastModified = ?,
-        synced = TRUE
+        synced = 1
     WHERE path = ? AND rootFolderId = $rootFolderId
     ''';
 
@@ -522,7 +534,7 @@ class NextcloudDAV {
     String localRootPath,
     int lastModifiedTime,
   ) async {
-    final client = HttpClient();
+    final client = _httpClient;
     bool success = false;
 
     try {
@@ -559,8 +571,6 @@ class NextcloudDAV {
       }
     } catch (e) {
       logger.e('Error downloading $fileUri: $e');
-    } finally {
-      client.close();
     }
     return success;
   }
@@ -571,9 +581,18 @@ class NextcloudDAV {
     int rootFolderId,
   ) async {
     final List<NextcloudSyncFile> uploadList = [];
-    final pool = Pool(10); // Limit to 10 concurrent uploads
+    final pool = Pool(2); // Limit to 2 concurrent uploads
 
     logger.i('Preparing uploads for local folder: $localRootPath');
+
+    // Ensure no double slashes in URL
+    final cleanRemoteUrl = remoteUrl.endsWith('/')
+        ? remoteUrl.substring(0, remoteUrl.length - 1)
+        : remoteUrl;
+    final cleanRemotePath = remoteRootPath.startsWith('/')
+        ? remoteRootPath.substring(1)
+        : remoteRootPath;
+    final fullRemoteUrl = '$cleanRemoteUrl/$cleanRemotePath';
 
     // Files not on server and never synced
     var sqlString =
@@ -590,7 +609,7 @@ class NextcloudDAV {
       sqlString: sqlString,
       dbConnection: db,
       nextCloudFiles: uploadList,
-      remoteBase: remoteUrl,
+      remoteBase: fullRemoteUrl,
       localBase: localRootPath,
     );
 
@@ -606,16 +625,16 @@ class NextcloudDAV {
       sqlString: sqlString,
       dbConnection: db,
       nextCloudFiles: uploadList,
-      remoteBase: remoteUrl,
+      remoteBase: fullRemoteUrl,
       localBase: localRootPath,
     );
 
     final updateSql =
         '''
       UPDATE syncTable
-      SET existsRemote = TRUE,
+      SET existsRemote = 1,
           remoteLastModified = ?,
-          synced = TRUE
+          synced = 1
       WHERE path = ? AND rootFolderId = $rootFolderId
     ''';
 
@@ -624,7 +643,9 @@ class NextcloudDAV {
         uploadList.map((nextcloudFile) async {
           final resource = await pool.request();
           try {
-            logger.i('uploading file: ${nextcloudFile.localPath}');
+            logger.i(
+              'uploading file: ${nextcloudFile.localPath} to remote: ${nextcloudFile.remoteUrl}',
+            );
             final success = await uploadLocalFileAsync(
               nextcloudFile.remoteUrl,
               File(nextcloudFile.localPath),
@@ -657,7 +678,7 @@ class NextcloudDAV {
     File localFile,
     String localRootPath,
   ) async {
-    final client = HttpClient();
+    final client = _httpClient;
     bool success = false;
 
     try {
@@ -668,16 +689,36 @@ class NextcloudDAV {
           };
 
       logger.i('start uploading $remoteFileUrl...');
+
+      // Check if file exists before uploading
+      if (!localFile.existsSync()) {
+        logger.e('File does not exist: ${localFile.path}');
+        return false;
+      }
+
       final modTime =
           (localFile.lastModifiedSync().millisecondsSinceEpoch ~/ 1000);
+      final fileSize = localFile.lengthSync();
+      logger.i('File size: $fileSize bytes');
+
       final url = Uri.parse(remoteFileUrl);
       final request = await client.openUrl('PUT', url);
       request.headers.set('Authorization', authHeader);
       request.headers.set('Content-Type', 'application/octet-stream');
+      request.headers.set('Content-Length', fileSize.toString());
       request.headers.set('X-OC-MTime', modTime.toString());
-      request.add(await localFile.readAsBytes());
 
-      final response = await request.close();
+      // Stream the file instead of reading it all at once
+      final fileStream = localFile.openRead();
+      await request.addStream(fileStream);
+
+      final response = await request.close().timeout(
+        const Duration(seconds: 60),
+        onTimeout: () {
+          logger.e('Upload timeout for $remoteFileUrl');
+          throw TimeoutException('Upload timeout', const Duration(seconds: 60));
+        },
+      );
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         logger.e('Failed to upload ${localFile.path}: ${response.statusCode}');
@@ -689,8 +730,6 @@ class NextcloudDAV {
     } catch (e) {
       logger.e('Error uploading $remoteFileUrl: $e');
       success = false;
-    } finally {
-      client.close();
     }
     return success;
   }
@@ -701,7 +740,7 @@ class NextcloudDAV {
     int rootFolderId,
   ) async {
     final List<NextcloudSyncFile> deleteList = [];
-    final pool = Pool(10); // Limit to 10 concurrent deletions (optional)
+    final pool = Pool(2); // Limit to 10 concurrent deletions (optional)
 
     logger.i('Preparing deletions for remote folder: $remoteRootPath');
 
@@ -710,9 +749,9 @@ class NextcloudDAV {
         '''
     SELECT * FROM syncTable
     WHERE
-      (existsRemote = TRUE) AND
-      (existsLocal = FALSE) AND
-      (synced = TRUE) AND
+      (existsRemote = 1) AND
+      (existsLocal = 0) AND
+      (synced = 1) AND
       (rootFolderId = $rootFolderId);
     ''';
 
@@ -751,7 +790,7 @@ class NextcloudDAV {
   }
 
   Future<bool> deleteOnRemoteAsync(String fileUri) async {
-    final client = HttpClient();
+    final client = _httpClient;
     bool success = false;
 
     try {
@@ -777,8 +816,6 @@ class NextcloudDAV {
     } catch (e) {
       logger.e('Error deleting $fileUri: $e');
       success = false;
-    } finally {
-      client.close();
     }
     return success;
   }
@@ -801,6 +838,10 @@ class NextcloudDAV {
       returnValue = false;
     } else {
       for (final rootFolder in rootFolders) {
+        logger.i(
+          'Starting sync for root folder ID ${rootFolder.rootFolderId}: '
+          '${rootFolder.remoteRootPath} <-> ${rootFolder.localRootPath}',
+        );
         begin(rootFolder.rootFolderId);
         await updateRemoteFileList(
           rootFolder.remoteRootPath,
@@ -812,11 +853,11 @@ class NextcloudDAV {
           rootFolder.rootFolderId,
           rootFolder.allowedFileExtensions,
         );
-        await resolveConflicts(
-          rootFolder.localRootPath,
-          rootFolder.rootFolderId,
-        );
-        await download(rootFolder.localRootPath, rootFolder.rootFolderId);
+        // await resolveConflicts(
+        //   rootFolder.localRootPath,
+        //   rootFolder.rootFolderId,
+        // );
+        // await download(rootFolder.localRootPath, rootFolder.rootFolderId);
         await upload(
           rootFolder.remoteRootPath,
           rootFolder.localRootPath,
@@ -827,7 +868,7 @@ class NextcloudDAV {
           rootFolder.localRootPath,
           rootFolder.rootFolderId,
         );
-        await deleteOnLocal(rootFolder.localRootPath, rootFolder.rootFolderId);
+        // await deleteOnLocal(rootFolder.localRootPath, rootFolder.rootFolderId);
         finish(rootFolder.rootFolderId);
       }
     }
@@ -902,5 +943,6 @@ class NextcloudDAV {
 
   Future<void> close() async {
     await db.close();
+    _httpClient.close();
   }
 }

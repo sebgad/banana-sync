@@ -7,6 +7,7 @@ import 'package:banana_sync/ui/settings_page.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:banana_sync/ui/add_folder.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 Future<String> getDatabasePath() async {
   final dir = await getApplicationDocumentsDirectory();
@@ -113,6 +114,41 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _syncNextcloud() async {
+    // Check and request appropriate permissions based on Android version
+    PermissionStatus status = await Permission.photos.status;
+
+    // If not granted, request it
+    if (!status.isGranted) {
+      status = await Permission.photos.request();
+    }
+
+    // If still not granted, show error with option to open settings
+    if (!status.isGranted) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Permission Required'),
+          content: const Text(
+            'Please grant "Fotos und Videos" permission to sync files. This allows reading and managing your photos.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                openAppSettings();
+                Navigator.of(context).pop();
+              },
+              child: const Text('Open Settings'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
     setState(() {
       _isSyncing = true;
     });
@@ -255,7 +291,31 @@ class _MyHomePageState extends State<MyHomePage> {
                       icon: const Icon(Icons.delete, color: Colors.red),
                       tooltip: 'Delete this sync folder',
                       onPressed: () async {
-                        await _deleteRootPath(root.rootFolderId);
+                        showDialog(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('Confirm Deletion'),
+                            content: Text(
+                              'Are you sure you want to delete this sync folder?\n\nRemote: ${root.remoteRootPath}\nLocal: ${root.localRootPath}',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                child: const Text('Cancel'),
+                              ),
+                              TextButton(
+                                onPressed: () async {
+                                  Navigator.of(context).pop();
+                                  await _deleteRootPath(root.rootFolderId);
+                                },
+                                child: const Text(
+                                  'Delete',
+                                  style: TextStyle(color: Colors.red),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
                       },
                     ),
                   ),
@@ -289,9 +349,12 @@ class _MyHomePageState extends State<MyHomePage> {
                     }
                     _syncNextcloud();
                   },
-                  child: const Text('Sync Nextcloud'),
+                  child: const Text(
+                    'Sync Nextcloud',
+                    style: TextStyle(fontSize: 18),
+                  ),
                 ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 50),
         ],
       ),
     );
